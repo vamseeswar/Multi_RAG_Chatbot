@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>MultiRAG Chat & File Processor</title>
+<style>
+  body {
+    margin: 0; padding: 0;
+    font-family: Arial, sans-serif;
+    overflow-x: hidden;
+    background: #111;
+    position: relative;
+    color: #fff;
+  }
+
+  /* Dynamic background canvas */
+  #bgCanvas {
+    position: fixed;
+    top:0; left:0; width:100%; height:100%;
+    z-index: -1;
+  }
+
+  h1 { text-align:center; margin:20px 0 10px 0; }
+  .card {
+    background: rgba(36,36,36,0.85);
+    border-radius:10px; padding:14px;
+    margin:16px auto; max-width:980px;
+    box-shadow:0 1px 8px rgba(0,0,0,0.3);
+  }
+
+  #chat {
+    border:1px solid #444;
+    height:320px; overflow-y:auto; padding:12px;
+    border-radius:8px; background:transparent;
+  }
+
+  .message-row { display:flex; gap:8px; margin:6px 0; align-items:flex-start; }
+  .avatar { width:32px; height:32px; border-radius:50%; flex-shrink:0; }
+  .message {
+    padding:8px 12px; border-radius:10px;
+    max-width:70%; word-wrap:break-word;
+    font-weight:600; transition: all 0.3s ease;
+  }
+
+  .user .message {
+    background: rgba(0, 120, 255, 0.9);
+    color: #fff; margin-left:auto;
+    text-shadow: 0 0 2px rgba(0,0,0,0.7);
+  }
+
+  .bot .message {
+    background: rgba(240, 240, 240, 0.95);
+    color: #111; margin-right:auto;
+    text-shadow: 0 0 2px rgba(255,255,255,0.7);
+  }
+
+  #imagesContainer img {
+    max-width:160px; margin:6px; border-radius:6px; border:1px solid #ccc;
+  }
+
+  button { padding:8px 14px; border-radius:6px; border:none; background:#007bff; color:#fff; cursor:pointer; }
+  button.danger { background:#dc3545; }
+
+  input[type="text"], input[type="file"] {
+    padding:8px; border-radius:6px; border:1px solid #ccc; width:100%; box-sizing:border-box;
+  }
+
+  .row { display:flex; gap:8px; align-items:center; }
+  .muted { color:#aaa; font-size:0.9rem; }
+</style>
+</head>
+<body>
+<canvas id="bgCanvas"></canvas>
+
+<h1>MultiRAG Chat & File Processor</h1>
+
+<div class="card" id="uploadSection">
+  <h2>Upload File</h2>
+  <div class="row">
+    <input type="file" id="fileInput" multiple />
+    <button id="uploadBtn">Upload & Process</button>
+    <button id="clearBtn" class="danger">Clear All</button>
+  </div>
+  <div id="fileStatus" class="muted">No upload yet.</div>
+  <div id="uploadMeta" class="muted"></div>
+</div>
+
+<div class="card" id="chatSection">
+  <h2>Chat with MultiRAG Bot 🤖</h2>
+  <div id="chat"></div>
+  <div class="row" style="margin-top:8px;">
+    <input id="queryInput" type="text" placeholder="Ask a question (requires uploaded docs)"/>
+    <button id="sendBtn">Send</button>
+  </div>
+</div>
+
+<div class="card" id="imagesCard" style="display:none">
+  <h2>Processed Images</h2>
+  <div id="imagesContainer"></div>
+</div>
+
+<script>
+// ----- Dynamic Background -----
+const canvas = document.getElementById('bgCanvas');
+const ctx = canvas.getContext('2d');
+let w = canvas.width = window.innerWidth;
+let h = canvas.height = window.innerHeight;
+window.addEventListener('resize', ()=>{ w=canvas.width=window.innerWidth; h=canvas.height=window.innerHeight; });
+
+const particles = [];
+const particleCount = 120;
+function random(min,max){ return Math.random()*(max-min)+min; }
+class Particle{
+  constructor(){
+    this.x=random(0,w); this.y=random(0,h);
+    this.size=random(1,3);
+    this.speedX=random(-0.3,0.3); this.speedY=random(-0.3,0.3);
+    this.color=`hsla(${random(0,360)},70%,60%,0.7)`;
+  }
+  update(){
+    this.x+=this.speedX; this.y+=this.speedY;
+    if(this.x<0)this.x=w; if(this.x>w)this.x=0;
+    if(this.y<0)this.y=h; if(this.y>h)this.y=0;
+  }
+  draw(){ ctx.fillStyle=this.color; ctx.beginPath(); ctx.arc(this.x,this.y,this.size,0,Math.PI*2); ctx.fill(); }
+}
+for(let i=0;i<particleCount;i++) particles.push(new Particle());
+function animate(){ ctx.clearRect(0,0,w,h); particles.forEach(p=>{p.update();p.draw();}); requestAnimationFrame(animate);}
+animate();
+
+// ----- Chat text color animation -----
+function animateTextColors(){
+  const messages = document.querySelectorAll('.message');
+  const t = Date.now()/1000;
+  messages.forEach((m,i)=>{
+    if(m.parentElement.classList.contains('user')){
+      m.style.color = `hsl(${(t*50 + i*50)%360},80%,85%)`;
+    } else {
+      m.style.color = `hsl(${(t*30 + i*60)%360},60%,75%)`;
+    }
+  });
+  requestAnimationFrame(animateTextColors);
+}
+animateTextColors();
+
+// ----- Chat and Upload -----
+const BASE_URL = window.location.origin;
+let currentUploadId = null;
+const userAvatar = "https://i.pravatar.cc/32?u=user";
+const botAvatar = "https://i.pravatar.cc/32?u=torquee";
+
+document.getElementById('uploadBtn').addEventListener('click', startUpload);
+document.getElementById('sendBtn').addEventListener('click', sendQuery);
+document.getElementById('clearBtn').addEventListener('click', clearData);
+
+function setStatus(text,color){ const el=document.getElementById('fileStatus'); el.innerText=text; el.style.color=color||''; }
+
+async function startUpload(){
+  const files=document.getElementById('fileInput').files;
+  if(!files.length) return alert('Choose at least one file!');
+  setStatus("Uploading...");
+  for(const f of files){
+    const fd=new FormData(); fd.append('file',f);
+    const resp=await fetch(`${BASE_URL}/upload`,{method:'POST',body:fd});
+    const data=await resp.json();
+    if(data.status==='success'){
+      currentUploadId=data.upload_id;
+      setStatus("File uploaded. Processing...");
+      checkUploadStatus();
+    } else setStatus("Upload failed",'crimson');
+  }
+}
+
+async function checkUploadStatus(){
+  if(!currentUploadId) return;
+  const res=await fetch(`/upload_status/${currentUploadId}`);
+  const data=await res.json();
+  if(data.status==="done"){
+    setStatus("Processing complete ✅");
+    document.getElementById("uploadMeta").innerText=`Chunks: ${data.chunks} | Images: ${data.images}`;
+    if(data.images>0) loadImages();
+  } else if(data.status==="failed"){
+    setStatus("Processing failed ❌: "+data.error,'crimson');
+  } else{
+    setStatus(`Status: ${data.status}...`);
+    setTimeout(checkUploadStatus,2000);
+  }
+}
+
+function appendMessage(sender,text){
+  const chat=document.getElementById('chat');
+  const row=document.createElement('div'); row.className='message-row '+sender;
+  const avatar=document.createElement('img'); avatar.className='avatar';
+  avatar.src=sender==='user'?userAvatar:botAvatar;
+  const bubble=document.createElement('div'); bubble.className='message'; bubble.textContent=text;
+  row.appendChild(avatar); row.appendChild(bubble); chat.appendChild(row); chat.scrollTop=chat.scrollHeight;
+}
+
+async function sendQuery(){
+  const input=document.getElementById('queryInput'); const q=input.value.trim();
+  if(!q) return;
+  appendMessage('user',q); input.value='';
+  const resp=await fetch(`${BASE_URL}/ask`,{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({query:q})
+  });
+  const data=await resp.json();
+  if(data.status==='success') appendMessage('bot',data.answer||"(no answer)");
+  else appendMessage('bot',data.message||"Error");
+}
+
+async function clearData(){
+  if(!confirm("Clear all files, images, and DB?")) return;
+  const resp=await fetch(`${BASE_URL}/clear`,{method:'POST'});
+  const data=await resp.json();
+  alert(data.message||'Cleared');
+  document.getElementById('chat').innerHTML='';
+  document.getElementById('imagesContainer').innerHTML='';
+  document.getElementById('imagesCard').style.display='none';
+  setStatus('');
+  document.getElementById('uploadMeta').innerText='';
+}
+
+async function loadImages(){
+  const res=await fetch(`/list_images`);
+  const data=await res.json();
+  if(data.status==="success"){
+    const container=document.getElementById('imagesContainer');
+    container.innerHTML='';
+    data.images.forEach(id=>{ const img=document.createElement('img'); img.src=`/get_image/${id}`; container.appendChild(img); });
+    document.getElementById('imagesCard').style.display=data.images.length?'block':'none';
+  }
+}
+</script>
+</body>
+</html>
