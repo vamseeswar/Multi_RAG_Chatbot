@@ -14,7 +14,7 @@ from flask import Flask, request, jsonify, render_template, send_from_directory
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
-# LangChain/compat imports (works with different langchain versions)
+# LangChain / compat imports
 from langchain_chroma import Chroma
 try:
     from langchain_core.documents import Document
@@ -37,9 +37,9 @@ from pptx import Presentation
 import pytesseract
 import cv2
 
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # Setup
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -47,23 +47,14 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__, template_folder="templates")
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 200MB upload
+app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 app.config['UPLOAD_FOLDER'] = os.getenv('UPLOAD_FOLDER', 'uploads')
 app.config['PROCESSED_FOLDER'] = os.getenv('PROCESSED_FOLDER', 'processed')
-app.config['CHROMA_DIR'] = os.getenv(
-    'CHROMA_DIR', os.path.join(app.config['PROCESSED_FOLDER'], "chroma_db")
-)
-app.config['ALLOWED_EXTENSIONS'] = set(
-    os.getenv(
-        'ALLOWED_EXTENSIONS',
-        'pdf,doc,docx,xlsx,xls,ppt,pptx,txt,md,html,rtf,odt,ods,odp,csv,png,jpg,jpeg'
-    ).split(',')
-)
+app.config['CHROMA_DIR'] = os.getenv('CHROMA_DIR', os.path.join(app.config['PROCESSED_FOLDER'], "chroma_db"))
+app.config['ALLOWED_EXTENSIONS'] = set(os.getenv('ALLOWED_EXTENSIONS', 'pdf,doc,docx,xlsx,xls,ppt,pptx,txt,md,html,rtf,odt,ods,odp,csv,png,jpg,jpeg').split(','))
 app.config['CHUNK_SIZE'] = int(os.getenv('CHUNK_SIZE', 1000))
 app.config['CHUNK_OVERLAP'] = int(os.getenv('CHUNK_OVERLAP', 200))
-app.config['EMBEDDING_MODEL'] = os.getenv(
-    'EMBEDDING_MODEL', 'sentence-transformers/all-MiniLM-L6-v2'
-)
+app.config['EMBEDDING_MODEL'] = os.getenv('EMBEDDING_MODEL', 'sentence-transformers/all-MiniLM-L6-v2')
 app.config['EMBEDDING_DEVICE'] = os.getenv('EMBEDDING_DEVICE', 'cpu')
 app.config['SIMILARITY_K'] = int(os.getenv('SIMILARITY_K', 10))
 app.config['SIMILARITY_THRESHOLD'] = float(os.getenv('SIMILARITY_THRESHOLD', 0.5))
@@ -72,6 +63,9 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(app.config['PROCESSED_FOLDER'], exist_ok=True)
 os.makedirs(app.config['CHROMA_DIR'], exist_ok=True)
 
+# ----------------------------------------------------------------------
+# Global instances
+# ----------------------------------------------------------------------
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=app.config['CHUNK_SIZE'],
     chunk_overlap=app.config['CHUNK_OVERLAP'],
@@ -97,19 +91,15 @@ upload_status: Dict[str, Dict[str, Any]] = {}
 upload_status_lock = threading.Lock()
 current_document_source: str = None
 
-
-# ------------------------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# Helper functions
+# ----------------------------------------------------------------------
 def allowed_file(filename: str) -> bool:
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
-
-def save_file_streamed(file_storage, dest_path: str, chunk_size: int = 16 * 1024):
-    # write uploaded file to disk in chunks
+def save_file_streamed(file_storage, dest_path: str, chunk_size: int = 16*1024):
     with open(dest_path, "wb") as w:
         shutil.copyfileobj(file_storage.stream, w, length=chunk_size)
-
 
 def clean_text(text: str) -> str:
     if not text:
@@ -117,7 +107,6 @@ def clean_text(text: str) -> str:
     text = re.sub(r'\s+', ' ', text)
     text = re.sub(r'[^\w\s.,!?;:-]', ' ', text)
     return text.strip()
-
 
 def create_enhanced_context_message(query: str, context_docs: List[Document]) -> List:
     system_prompt = (
@@ -127,9 +116,7 @@ def create_enhanced_context_message(query: str, context_docs: List[Document]) ->
     context_block = "\n".join([clean_text(d.page_content) for d in context_docs]) if context_docs else "No relevant context found."
     return [SystemMessage(content=system_prompt + context_block), HumanMessage(content=query)]
 
-
 def fast_clear_directory(dirpath: str):
-    # remove all files and folders inside dirpath, then recreate it
     if not os.path.exists(dirpath):
         os.makedirs(dirpath, exist_ok=True)
         return
@@ -141,24 +128,19 @@ def fast_clear_directory(dirpath: str):
                 shutil.rmtree(entry.path, ignore_errors=True)
         except Exception:
             continue
-    # remove and recreate root dir to ensure clean state
     try:
         shutil.rmtree(dirpath, ignore_errors=True)
     except Exception:
         pass
     os.makedirs(dirpath, exist_ok=True)
 
-
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # Document Processor
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 class AdvancedDocumentProcessor:
-    """Extract text & images from multiple file formats."""
-
     def process_document(self, path: str, filename: str):
         ext = filename.lower().rsplit(".", 1)[-1]
         docs, images = [], {}
-
         if ext in ["pdf"]:
             docs, images = self._process_pdf(path, filename)
         elif ext in ["docx", "doc", "odt", "rtf"]:
@@ -173,23 +155,19 @@ class AdvancedDocumentProcessor:
             docs, images = self._process_image(path, filename)
         else:
             docs = [Document(page_content="Unsupported file format", metadata={"source": filename})]
-
         return docs, images
 
     def _process_pdf(self, path: str, filename: str):
         docs, images = [], {}
-        # extract text pages with pdfplumber
         try:
             with pdfplumber.open(path) as pdf:
                 for i, page in enumerate(pdf.pages):
                     text = page.extract_text() or ""
                     if text.strip():
                         chunks = text_splitter.split_text(clean_text(text))
-                        docs.extend([Document(page_content=c, metadata={"source": filename, "page": i + 1}) for c in chunks])
+                        docs.extend([Document(page_content=c, metadata={"source": filename, "page": i+1}) for c in chunks])
         except Exception:
             pass
-
-        # extract embedded images using PyMuPDF
         try:
             pdf_doc = fitz.open(path)
             for page_num in range(len(pdf_doc)):
@@ -197,15 +175,13 @@ class AdvancedDocumentProcessor:
                 for img_index, img in enumerate(images_on_page):
                     xref = img[0]
                     base = pdf_doc.extract_image(xref)
-                    if not base:
-                        continue
+                    if not base: continue
                     image_bytes = base.get("image")
                     if image_bytes:
                         img_id = f"{uuid.uuid4().hex}"
                         images[img_id] = base64.b64encode(image_bytes).decode("utf-8")
         except Exception:
             pass
-
         return docs, images
 
     def _process_docx(self, path: str, filename: str):
@@ -213,8 +189,9 @@ class AdvancedDocumentProcessor:
         try:
             doc = docx.Document(path)
             full_text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-            chunks = text_splitter.split_text(clean_text(full_text))
-            docs.extend([Document(page_content=c, metadata={"source": filename}) for c in chunks])
+            if full_text.strip():
+                chunks = text_splitter.split_text(clean_text(full_text))
+                docs.extend([Document(page_content=c, metadata={"source": filename}) for c in chunks])
         except Exception:
             pass
         return docs
@@ -228,8 +205,7 @@ class AdvancedDocumentProcessor:
                 values = []
                 for row in sh.iter_rows(values_only=True):
                     vals = [str(cell) for cell in (row or []) if cell is not None and str(cell).strip()]
-                    if vals:
-                        values.append(" ".join(vals))
+                    if vals: values.append(" ".join(vals))
                 text = "\n".join(values)
                 if text.strip():
                     chunks = text_splitter.split_text(clean_text(text))
@@ -253,7 +229,7 @@ class AdvancedDocumentProcessor:
                 text = "\n".join(texts)
                 if text.strip():
                     chunks = text_splitter.split_text(clean_text(text))
-                    docs.extend([Document(page_content=c, metadata={"source": filename, "slide": i + 1}) for c in chunks])
+                    docs.extend([Document(page_content=c, metadata={"source": filename, "slide": i+1}) for c in chunks])
         except Exception:
             pass
         return docs
@@ -275,7 +251,6 @@ class AdvancedDocumentProcessor:
         try:
             img = cv2.imread(path)
             if img is not None:
-                # OCR
                 try:
                     text = pytesseract.image_to_string(img)
                 except Exception:
@@ -283,7 +258,6 @@ class AdvancedDocumentProcessor:
                 if text.strip():
                     chunks = text_splitter.split_text(clean_text(text))
                     docs.extend([Document(page_content=c, metadata={"source": filename}) for c in chunks])
-                # store base64 representation
                 with open(path, "rb") as f:
                     b64 = base64.b64encode(f.read()).decode("utf-8")
                 img_id = f"{uuid.uuid4().hex}"
@@ -292,13 +266,12 @@ class AdvancedDocumentProcessor:
             pass
         return docs, images
 
-
-# instantiate globally (after class definition)
+# instantiate globally
 doc_processor = AdvancedDocumentProcessor()
 
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # Vector Store Handling
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 def get_or_create_vector_store(docs: List[Document] = None) -> Chroma:
     global vector_store, current_document_source
     with vector_lock:
@@ -308,22 +281,19 @@ def get_or_create_vector_store(docs: List[Document] = None) -> Chroma:
             except Exception:
                 vector_store = None
 
-        # if uploading new docs for a different source, delete old vectors
         if docs and current_document_source:
             try:
                 if vector_store is not None:
                     all_ids = vector_store.get().get('ids', [])
-                    if all_ids:
-                        vector_store.delete(ids=all_ids)
+                    if all_ids: vector_store.delete(ids=all_ids)
             except Exception:
-                # best-effort — if deletion fails, recreate below
                 vector_store = None
 
         if vector_store is None and docs:
             try:
                 vector_store = Chroma.from_documents(documents=docs, embedding_function=embeddings, persist_directory=app.config['CHROMA_DIR'])
             except Exception as e:
-                logger.exception("Failed to create Chroma from documents: %s", e)
+                logger.exception("Failed to create Chroma: %s", e)
                 vector_store = None
         elif vector_store is not None and docs:
             try:
@@ -333,10 +303,9 @@ def get_or_create_vector_store(docs: List[Document] = None) -> Chroma:
                 pass
     return vector_store
 
-
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # Background Upload Processing
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 def process_upload_background(upload_id: str, path: str, filename: str):
     global current_document_source
     with upload_status_lock:
@@ -370,104 +339,86 @@ def process_upload_background(upload_id: str, path: str, filename: str):
             upload_status[upload_id]['status'] = 'failed'
             upload_status[upload_id]['error'] = str(e)
 
-
-# ------------------------------------------------------------------------------
-# Routes
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# Flask Routes
+# ----------------------------------------------------------------------
 @app.route('/')
 def index():
-    return render_template('index.html') if os.path.exists('templates/index.html') else jsonify({'status': 'ok', 'message': 'MultiRAG API'})
-
+    return render_template('index.html') if os.path.exists('templates/index.html') else jsonify({'status':'ok','message':'MultiRAG API'})
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
     if 'file' not in request.files:
-        return jsonify({'status': 'error', 'message': 'No file provided'}), 400
+        return jsonify({'status':'error','message':'No file provided'}),400
     file = request.files['file']
-    if not file or file.filename == '':
-        return jsonify({'status': 'error', 'message': 'No file selected'}), 400
+    if not file or file.filename=='':
+        return jsonify({'status':'error','message':'No file selected'}),400
     if not allowed_file(file.filename):
-        return jsonify({'status': 'error', 'message': f'File type not allowed: {file.filename}'}), 400
+        return jsonify({'status':'error','message':f'File type not allowed: {file.filename}'}),400
 
     filename = secure_filename(file.filename)
     upload_id = uuid.uuid4().hex
     dest_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{upload_id}_{filename}")
     try:
-        save_file_streamed(file, dest_path)
+        save_file_streamed(file,dest_path)
     except Exception as e:
         logger.exception("Failed saving upload: %s", e)
-        return jsonify({'status': 'error', 'message': f'Failed to save file: {e}'}), 500
+        return jsonify({'status':'error','message':f'Failed to save file: {e}'}),500
 
     with upload_status_lock:
         upload_status[upload_id] = {
-            'status': 'queued',
-            'filename': filename,
-            'chunks': 0,
-            'images': 0,
-            'step': 'queued',
-            'error': None,
-            'created_at': time.time()
+            'status':'queued','filename':filename,'chunks':0,'images':0,'step':'queued','error':None,'created_at':time.time()
         }
-
-    threading.Thread(target=process_upload_background, args=(upload_id, dest_path, filename), daemon=True).start()
-    return jsonify({'status': 'success', 'upload_id': upload_id, 'message': f'{filename} uploaded and processing started'}), 202
-
+    threading.Thread(target=process_upload_background, args=(upload_id,dest_path,filename), daemon=True).start()
+    return jsonify({'status':'success','upload_id':upload_id,'message':f'{filename} uploaded and processing started'}),202
 
 @app.route('/upload_status/<upload_id>', methods=['GET'])
 def upload_status_route(upload_id: str):
     with upload_status_lock:
         st = upload_status.get(upload_id)
     if not st:
-        return jsonify({'status': 'error', 'message': 'upload_id not found'}), 404
+        return jsonify({'status':'error','message':'upload_id not found'}),404
     resp = dict(st)
     if resp.get('processed_at'):
         resp['processed_at_human'] = time.ctime(resp['processed_at'])
     return jsonify(resp)
 
-
 @app.route('/ask', methods=['POST'])
 def ask():
     payload = request.get_json(force=True)
-    query = payload.get('query', '').strip()
+    query = payload.get('query','').strip()
     if not query:
-        return jsonify({'status': 'error', 'message': 'Query required'}), 400
+        return jsonify({'status':'error','message':'Query required'}),400
     vs = get_or_create_vector_store()
     if vs is None:
-        return jsonify({'status': 'error', 'message': 'No vector DB. Upload documents first.'}), 400
+        return jsonify({'status':'error','message':'No vector DB. Upload documents first.'}),400
     filter_dict = {"source": current_document_source} if current_document_source else None
     results = []
     try:
-        # try similarity_search_with_score if available
-        results = vs.similarity_search_with_score(query, k=app.config['SIMILARITY_K'] * 2, filter=filter_dict)
+        results = vs.similarity_search_with_score(query, k=app.config['SIMILARITY_K']*2, filter=filter_dict)
     except Exception:
         try:
-            # fallback to similarity_search (no scores) - wrap results as (doc, 1.0)
-            results = [(d, 1.0) for d in vs.similarity_search(query, k=app.config['SIMILARITY_K'] * 2)]
+            results = [(d,1.0) for d in vs.similarity_search(query,k=app.config['SIMILARITY_K']*2)]
         except Exception as e:
             logger.exception("Similarity search failed: %s", e)
-            return jsonify({'status': 'error', 'message': 'Similarity search failed.'}), 500
-
-    filtered_results = [doc for doc, score in results if score is not None and score >= app.config['SIMILARITY_THRESHOLD']]
+            return jsonify({'status':'error','message':'Similarity search failed.'}),500
+    filtered_results = [doc for doc,score in results if score is not None and score>=app.config['SIMILARITY_THRESHOLD']]
     top_docs = filtered_results[:app.config['SIMILARITY_K']]
-
     messages = create_enhanced_context_message(query, top_docs) if top_docs else [
-        SystemMessage(content="Answer from the uploaded file context. If not found, say: 'I don't know.'"),
+        SystemMessage(content="Answer from uploaded context. If not found, say: 'I don't know.'"),
         HumanMessage(content=query)
     ]
-
     try:
         response = groq_client.invoke(messages)
-        llm_answer = getattr(response, 'content', str(response))
+        llm_answer = getattr(response,'content',str(response))
     except Exception as e:
         logger.exception("LLM invocation error: %s", e)
-        return jsonify({'status': 'error', 'message': f'LLM error: {e}'}), 500
-
+        return jsonify({'status':'error','message':f'LLM error: {e}'}),500
     return jsonify({
-        'status': 'success',
+        'status':'success',
         'answer': llm_answer,
-        'retrieved_documents': [{'source': d.metadata.get('source'), 'preview': d.page_content[:200]} for d in top_docs]
+        'retrieved_documents':[{'source':d.metadata.get('source'),'preview':d.page_content[:200]} for d in top_docs]
     })
-
 
 @app.route('/clear', methods=['POST'])
 @app.route('/clear_data', methods=['POST'])
@@ -475,51 +426,44 @@ def clear_data():
     global vector_store, all_docs, image_data_store, current_file_info, upload_status, current_document_source
     with vector_lock:
         vector_store = None
-    all_docs = []
-    image_data_store = {}
-    current_file_info = {}
-    current_document_source = None
+    all_docs=[]; image_data_store={}; current_file_info={}; current_document_source=None
     with upload_status_lock:
-        upload_status = {}
+        upload_status={}
     fast_clear_directory(app.config['PROCESSED_FOLDER'])
     fast_clear_directory(app.config['CHROMA_DIR'])
-    return jsonify({'status': 'success', 'message': 'Cleared vector DB and files.'})
-
+    return jsonify({'status':'success','message':'Cleared vector DB and files.'})
 
 @app.route('/get_image/<image_id>')
 def get_image(image_id: str):
-    filename = f"{image_id}.png"
-    path = os.path.join(app.config['PROCESSED_FOLDER'], filename)
+    filename=f"{image_id}.png"
+    path=os.path.join(app.config['PROCESSED_FOLDER'], filename)
     if os.path.exists(path):
         return send_from_directory(app.config['PROCESSED_FOLDER'], filename)
-    b64 = image_data_store.get(image_id)
+    b64=image_data_store.get(image_id)
     if b64:
-        return (base64.b64decode(b64), 200, {'Content-Type': 'image/png'})
-    return jsonify({'status': 'error', 'message': 'Image not found'}), 404
-
+        return (base64.b64decode(b64), 200, {'Content-Type':'image/png'})
+    return jsonify({'status':'error','message':'Image not found'}),404
 
 @app.route('/list_images')
 def list_images():
     try:
-        imgs = [fn.replace('.png', '') for fn in os.listdir(app.config['PROCESSED_FOLDER']) if fn.lower().endswith('.png')]
+        imgs=[fn.replace('.png','') for fn in os.listdir(app.config['PROCESSED_FOLDER']) if fn.lower().endswith('.png')]
     except Exception:
-        imgs = list(image_data_store.keys())
-    return jsonify({'status': 'success', 'images': imgs})
-
+        imgs=list(image_data_store.keys())
+    return jsonify({'status':'success','images':imgs})
 
 @app.route('/health')
 def health():
     return jsonify({
-        'status': 'ok',
-        'has_vector_store': bool(vector_store),
-        'loaded_docs': len(all_docs),
-        'current_document': current_document_source
+        'status':'ok',
+        'has_vector_store':bool(vector_store),
+        'loaded_docs':len(all_docs),
+        'current_document':current_document_source
     })
 
-
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # Main
-# ------------------------------------------------------------------------------
-if __name__ == '__main__':
+# ----------------------------------------------------------------------
+if __name__=='__main__':
     logger.info("Starting MultiRAG server. Chroma DB present: %s", os.path.exists(app.config['CHROMA_DIR']))
-    app.run(debug=True, host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
+    app.run(debug=True, host='0.0.0.0', port=int(os.getenv('PORT',5000)))
