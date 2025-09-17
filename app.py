@@ -14,11 +14,11 @@ from flask import Flask, request, jsonify, render_template, send_from_directory
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
-# LangChain/compat imports
+# LangChain/compat imports (works with different langchain versions)
 from langchain_chroma import Chroma
 try:
-    from langchain_core.schema import Document
-    from langchain_core.schema.messages import HumanMessage, SystemMessage
+    from langchain_core.documents import Document
+    from langchain_core.messages import HumanMessage, SystemMessage
 except Exception:
     from langchain.schema import Document
     from langchain.schema.messages import HumanMessage, SystemMessage
@@ -37,28 +37,33 @@ from pptx import Presentation
 import pytesseract
 import cv2
 
-# --------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 # Setup
-# --------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__, template_folder="templates")
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-# Config
-app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 200MB
+app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 200MB upload
 app.config['UPLOAD_FOLDER'] = os.getenv('UPLOAD_FOLDER', 'uploads')
 app.config['PROCESSED_FOLDER'] = os.getenv('PROCESSED_FOLDER', 'processed')
-app.config['CHROMA_DIR'] = os.getenv('CHROMA_DIR', os.path.join(app.config['PROCESSED_FOLDER'], "chroma_db"))
-app.config['ALLOWED_EXTENSIONS'] = set(os.getenv(
-    'ALLOWED_EXTENSIONS',
-    'pdf,doc,docx,xlsx,xls,ppt,pptx,txt,md,html,rtf,odt,ods,odp,csv,png,jpg,jpeg'
-).split(','))
+app.config['CHROMA_DIR'] = os.getenv(
+    'CHROMA_DIR', os.path.join(app.config['PROCESSED_FOLDER'], "chroma_db")
+)
+app.config['ALLOWED_EXTENSIONS'] = set(
+    os.getenv(
+        'ALLOWED_EXTENSIONS',
+        'pdf,doc,docx,xlsx,xls,ppt,pptx,txt,md,html,rtf,odt,ods,odp,csv,png,jpg,jpeg'
+    ).split(',')
+)
 app.config['CHUNK_SIZE'] = int(os.getenv('CHUNK_SIZE', 1000))
 app.config['CHUNK_OVERLAP'] = int(os.getenv('CHUNK_OVERLAP', 200))
-app.config['EMBEDDING_MODEL'] = os.getenv('EMBEDDING_MODEL', 'sentence-transformers/all-MiniLM-L6-v2')
+app.config['EMBEDDING_MODEL'] = os.getenv(
+    'EMBEDDING_MODEL', 'sentence-transformers/all-MiniLM-L6-v2'
+)
 app.config['EMBEDDING_DEVICE'] = os.getenv('EMBEDDING_DEVICE', 'cpu')
 app.config['SIMILARITY_K'] = int(os.getenv('SIMILARITY_K', 10))
 app.config['SIMILARITY_THRESHOLD'] = float(os.getenv('SIMILARITY_THRESHOLD', 0.5))
@@ -92,14 +97,16 @@ upload_status: Dict[str, Dict[str, Any]] = {}
 upload_status_lock = threading.Lock()
 current_document_source: str = None
 
-# --------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
 # Helpers
-# --------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 def allowed_file(filename: str) -> bool:
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
 
 def save_file_streamed(file_storage, dest_path: str, chunk_size: int = 16 * 1024):
+    # write uploaded file to disk in chunks
     with open(dest_path, "wb") as w:
         shutil.copyfileobj(file_storage.stream, w, length=chunk_size)
 
@@ -122,29 +129,29 @@ def create_enhanced_context_message(query: str, context_docs: List[Document]) ->
 
 
 def fast_clear_directory(dirpath: str):
-    if os.path.exists(dirpath):
+    # remove all files and folders inside dirpath, then recreate it
+    if not os.path.exists(dirpath):
+        os.makedirs(dirpath, exist_ok=True)
+        return
+    for entry in os.scandir(dirpath):
+        try:
+            if entry.is_file():
+                os.unlink(entry.path)
+            elif entry.is_dir():
+                shutil.rmtree(entry.path, ignore_errors=True)
+        except Exception:
+            continue
+    # remove and recreate root dir to ensure clean state
+    try:
         shutil.rmtree(dirpath, ignore_errors=True)
+    except Exception:
+        pass
     os.makedirs(dirpath, exist_ok=True)
 
 
-def extract_text_from_image(path: str) -> str:
-    try:
-        img = cv2.imread(path)
-        if img is None:
-            return ""
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        gray = cv2.adaptiveThreshold(gray, 255,
-                                     cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                     cv2.THRESH_BINARY, 11, 2)
-        text = pytesseract.image_to_string(gray, lang='eng')
-        return text
-    except Exception:
-        return ""
-
-
-# --------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 # Document Processor
-# --------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 class AdvancedDocumentProcessor:
     """Extract text & images from multiple file formats."""
 
@@ -169,9 +176,9 @@ class AdvancedDocumentProcessor:
 
         return docs, images
 
-    # PDF
     def _process_pdf(self, path: str, filename: str):
         docs, images = [], {}
+        # extract text pages with pdfplumber
         try:
             with pdfplumber.open(path) as pdf:
                 for i, page in enumerate(pdf.pages):
@@ -182,22 +189,18 @@ class AdvancedDocumentProcessor:
         except Exception:
             pass
 
+        # extract embedded images using PyMuPDF
         try:
             pdf_doc = fitz.open(path)
             for page_num in range(len(pdf_doc)):
-                for img_index, img in enumerate(pdf_doc.get_page_images(page_num)):
+                images_on_page = pdf_doc.get_page_images(page_num)
+                for img_index, img in enumerate(images_on_page):
                     xref = img[0]
                     base = pdf_doc.extract_image(xref)
-                    image_bytes = base.get("image") if base else None
+                    if not base:
+                        continue
+                    image_bytes = base.get("image")
                     if image_bytes:
-                        tmp_path = f"tmp_{uuid.uuid4().hex}.png"
-                        with open(tmp_path, "wb") as f:
-                            f.write(image_bytes)
-                        text = extract_text_from_image(tmp_path)
-                        os.remove(tmp_path)
-                        if text.strip():
-                            chunks = text_splitter.split_text(clean_text(text))
-                            docs.extend([Document(page_content=c, metadata={"source": filename, "page": page_num + 1}) for c in chunks])
                         img_id = f"{uuid.uuid4().hex}"
                         images[img_id] = base64.b64encode(image_bytes).decode("utf-8")
         except Exception:
@@ -205,20 +208,17 @@ class AdvancedDocumentProcessor:
 
         return docs, images
 
-    # DOCX/ODT
     def _process_docx(self, path: str, filename: str):
         docs = []
         try:
             doc = docx.Document(path)
             full_text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-            if full_text.strip():
-                chunks = text_splitter.split_text(clean_text(full_text))
-                docs.extend([Document(page_content=c, metadata={"source": filename}) for c in chunks])
+            chunks = text_splitter.split_text(clean_text(full_text))
+            docs.extend([Document(page_content=c, metadata={"source": filename}) for c in chunks])
         except Exception:
             pass
         return docs
 
-    # Excel
     def _process_excel(self, path: str, filename: str):
         docs = []
         try:
@@ -238,7 +238,6 @@ class AdvancedDocumentProcessor:
             pass
         return docs
 
-    # PowerPoint
     def _process_ppt(self, path: str, filename: str):
         docs = []
         try:
@@ -246,8 +245,11 @@ class AdvancedDocumentProcessor:
             for i, slide in enumerate(prs.slides):
                 texts = []
                 for shape in slide.shapes:
-                    if hasattr(shape, "text") and shape.text:
-                        texts.append(shape.text)
+                    try:
+                        if hasattr(shape, "text") and shape.text:
+                            texts.append(shape.text)
+                    except Exception:
+                        continue
                 text = "\n".join(texts)
                 if text.strip():
                     chunks = text_splitter.split_text(clean_text(text))
@@ -256,7 +258,6 @@ class AdvancedDocumentProcessor:
             pass
         return docs
 
-    # Text
     def _process_text(self, path: str, filename: str):
         docs = []
         try:
@@ -269,28 +270,35 @@ class AdvancedDocumentProcessor:
             pass
         return docs
 
-    # Images
     def _process_image(self, path: str, filename: str):
         docs, images = [], {}
         try:
-            text = extract_text_from_image(path)
-            if text.strip():
-                chunks = text_splitter.split_text(clean_text(text))
-                docs.extend([Document(page_content=c, metadata={"source": filename}) for c in chunks])
-            with open(path, "rb") as f:
-                b64 = base64.b64encode(f.read()).decode("utf-8")
-            img_id = f"{uuid.uuid4().hex}"
-            images[img_id] = b64
+            img = cv2.imread(path)
+            if img is not None:
+                # OCR
+                try:
+                    text = pytesseract.image_to_string(img)
+                except Exception:
+                    text = ""
+                if text.strip():
+                    chunks = text_splitter.split_text(clean_text(text))
+                    docs.extend([Document(page_content=c, metadata={"source": filename}) for c in chunks])
+                # store base64 representation
+                with open(path, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("utf-8")
+                img_id = f"{uuid.uuid4().hex}"
+                images[img_id] = b64
         except Exception:
             pass
         return docs, images
 
 
+# instantiate globally (after class definition)
 doc_processor = AdvancedDocumentProcessor()
 
-# --------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 # Vector Store Handling
-# --------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 def get_or_create_vector_store(docs: List[Document] = None) -> Chroma:
     global vector_store, current_document_source
     with vector_lock:
@@ -300,22 +308,24 @@ def get_or_create_vector_store(docs: List[Document] = None) -> Chroma:
             except Exception:
                 vector_store = None
 
+        # if uploading new docs for a different source, delete old vectors
         if docs and current_document_source:
             try:
-                if vector_store:
+                if vector_store is not None:
                     all_ids = vector_store.get().get('ids', [])
                     if all_ids:
                         vector_store.delete(ids=all_ids)
             except Exception:
+                # best-effort — if deletion fails, recreate below
                 vector_store = None
 
         if vector_store is None and docs:
             try:
                 vector_store = Chroma.from_documents(documents=docs, embedding_function=embeddings, persist_directory=app.config['CHROMA_DIR'])
             except Exception as e:
-                logger.exception("Failed to create Chroma: %s", e)
+                logger.exception("Failed to create Chroma from documents: %s", e)
                 vector_store = None
-        elif vector_store and docs:
+        elif vector_store is not None and docs:
             try:
                 vector_store.add_documents(docs)
                 vector_store.persist()
@@ -323,9 +333,10 @@ def get_or_create_vector_store(docs: List[Document] = None) -> Chroma:
                 pass
     return vector_store
 
-# --------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
 # Background Upload Processing
-# --------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 def process_upload_background(upload_id: str, path: str, filename: str):
     global current_document_source
     with upload_status_lock:
@@ -359,9 +370,10 @@ def process_upload_background(upload_id: str, path: str, filename: str):
             upload_status[upload_id]['status'] = 'failed'
             upload_status[upload_id]['error'] = str(e)
 
-# --------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
 # Routes
-# --------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 @app.route('/')
 def index():
     return render_template('index.html') if os.path.exists('templates/index.html') else jsonify({'status': 'ok', 'message': 'MultiRAG API'})
@@ -425,9 +437,11 @@ def ask():
     filter_dict = {"source": current_document_source} if current_document_source else None
     results = []
     try:
+        # try similarity_search_with_score if available
         results = vs.similarity_search_with_score(query, k=app.config['SIMILARITY_K'] * 2, filter=filter_dict)
     except Exception:
         try:
+            # fallback to similarity_search (no scores) - wrap results as (doc, 1.0)
             results = [(d, 1.0) for d in vs.similarity_search(query, k=app.config['SIMILARITY_K'] * 2)]
         except Exception as e:
             logger.exception("Similarity search failed: %s", e)
@@ -502,9 +516,10 @@ def health():
         'current_document': current_document_source
     })
 
-# --------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
 # Main
-# --------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 if __name__ == '__main__':
     logger.info("Starting MultiRAG server. Chroma DB present: %s", os.path.exists(app.config['CHROMA_DIR']))
     app.run(debug=True, host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
